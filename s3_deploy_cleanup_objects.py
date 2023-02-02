@@ -1,113 +1,80 @@
-from boto3 import client, Session
-from botocore.exceptions import ClientError
-from datetime import datetime, timezone
 import argparse
+import boto3
+from botocore.exceptions import ClientError
+
+
+def clean_objects(s3_resource, number_deployments, bucket_name):
+
+    bucket = s3_resource.Bucket(bucket_name)
+
+    dir_list = []
+    dir_map = {}
+    del_list = []
+    file_list = []
+
+    print("\nYour bucket contains the following objects:")
+    try:
+        files = bucket.objects.filter(Prefix='')
+        files = [obj.key for obj in sorted(files, key=lambda x: x.last_modified, reverse=True)]
+        for file in files:
+            file_split = file.split('/', 1)
+            dir_list.append(file_split) 
+
+        for d in dir_list:
+            try:
+                f = list(set(dir_map.get(d[0], []) + d[1:]))
+                dir_map = {**dir_map, **{d[0]:f}}
+            except KeyError:
+                dir_map = {**dir_map, **{d[0]:d[1:]}}
+        for item in iter(dir_map.items()):
+            del_list.append(item)
+        del_list = del_list[number_deployments: ]
+        if len(del_list) > 0:
+            for key, value in del_list:
+                for v in value:
+                    ls = (key, v)
+                    deployment = "/".join(ls)
+                    file_list.append(deployment)
+                    print(deployment)
+        else:
+            print(f"No items to meet the criteria.\nExiting.")
+            quit()
+
+    except ClientError as err:
+        print(f"Couldn't list the objects in bucket {bucket.name}.")
+        print(f"\t{err.response['Error']['Code']}:{err.response['Error']['Message']}")
+
+
+    answer = input(
+        "\nDo you want to delete the list of objects in the bucket (y/n)? ")
+    if answer.lower() == 'y':
+        try:
+            for item in file_list:
+                obj = s3_resource.Object(bucket_name, item)
+                print(f"Deleting {obj.key}.")
+                obj.delete()
+        except ClientError as err:
+            print(f"Couldn't empty the bucket {bucket.name}.")
+            print(f"\t{err.response['Error']['Code']}:{err.response['Error']['Message']}")
+
 
 if __name__ == '__main__':
+
 
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--delete_after_retention_days', required=False, default=15)
-    parser.add_argument('--number_deployments', required=False)
+    parser.add_argument('--number_deployments', required=True)
     parser.add_argument('--bucket', required=True)
     parser.add_argument('--prefix', required=False, default="")
 
     args = parser.parse_args()
 
+    s3_resource = boto3.resource('s3')
     delete_after_retention_days = int(args.delete_after_retention_days)
-    number_deployments = args.number_deployments
-    bucket = args.bucket
-    prefix = args.prefix
+    number_deployments = int(args.number_deployments)
+    bucket_name = str(args.bucket)
 
-    # get current date
-    today = datetime.now(timezone.utc)
-
-    try:
-        # create a connection to Wasabi
-        s3_client = client('s3')
-    except Exception as e:
-        raise e
-
-    try:
-        # list all the buckets under the account
-        list_buckets = s3_client.list_buckets()
-    except ClientError:
-        # invalid access keys
-        raise Exception("Invalid Access or Secret key")
-
-    # create a paginator for all objects.
-    object_response_paginator = s3_client.get_paginator('list_objects')
-    if len(prefix) > 0:
-        operation_parameters = {'Bucket': bucket,
-                                'Prefix': prefix,}
-    else:
-        operation_parameters = {'Bucket': bucket}
-
-    # instantiate temp variables.
-    delete_list = []
-    prefix_list = []
-
-    get_last_modified = lambda obj: int(obj['LastModified'].strftime('%Y%m%d%H%M%S'))
-
-    print("$ Paginating bucket " + bucket)
-    if number_deployments:
-        operation_parameters['Delimiter'] = '/'
-        for object_response_itr in object_response_paginator.paginate(**operation_parameters):
-            try:
-                for content in object_response_itr['CommonPrefixes']:
-                    prefix_list.append({'Prefix': content['Prefix'][:-1]})
-            except KeyError:
-                print("No directories found in bucket.")
-
-        operation_parameters = {'Bucket': bucket,
-                                'Prefix': prefix,}
-        for prefix in prefix_list[0: int(number_deployments)]:
-            for object_response_itr in object_response_paginator.paginate(**operation_parameters):
-                if 'Contents' in object_response_itr:
-                    objs = object_response_itr['Contents']
-                    files = sorted(objs, key=get_last_modified)
-                    for file in files:
-                        delete_list.append({'Key': file['Key']}) #Figure out how to solve for Versioning later
-
-    elif delete_after_retention_days:
-        for object_response_itr in object_response_paginator.paginate(**operation_parameters):
-            for content in object_response_itr['Contents']:
-                if (today - content['LastModified']).days > delete_after_retention_days:
-                    delete_list.append({'Key': content['Key'], 'VersionId': ''})
-
-    # print objects count
-    print("-" * 20)
-    print("$ Before deleting objects")
-    print("$ Items marked for deletion: " + str(delete_list))
-    print("-" * 20)
-
-    # delete objects 1000 at a time
-    print("$ Deleting objects from bucket " + bucket)
-    for i in range(0, len(delete_list), 1000):
-        response = s3_client.delete_objects(
-            Bucket=bucket,
-            Delete={
-                'Objects': delete_list[i:i + 1000],
-                'Quiet': False
-            }
-        )
-
-    # reset counts
-    delete_list=[]
-
-    # paginate and recount
-    print("$ Paginating bucket " + bucket)
-    for object_response_itr in object_response_paginator.paginate(Bucket=bucket):
-        try:
-            for content in object_response_itr['Contents']:
-                if (today - content['LastModified']).days < delete_after_retention_days:
-                    delete_list.append({'Key': content['Key'], 'VersionId': content['VersionId']})
-        except KeyError:
-            print("No content found in bucket.")
-
-    # print objects count
-    print("-" * 20)
-    print("$ After deleting objects")
-    print("$ Items Remaining: " + str(delete_list))
-    print("-" * 20)
-    print("$ task complete")
+    # if number_deployments > 1:
+    #     number_deployments -= 1
+    clean_objects(s3_resource, number_deployments, bucket_name)
